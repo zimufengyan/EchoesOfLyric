@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="余韵，一本属于自己的诗词摘录。">
+  <title>余韵 · Echoes of Lyric</title>
+  <link rel="icon" type="image/svg+xml" href="APP_FAVICON">
+  <style id="app-style">/* APP_CSS */</style>
+</head>
+<body>
+  <div id="app">
+    <header class="app-header wrap">
+      <a class="brand" href="#" aria-label="余韵首页">
+        <span class="brand-mark" aria-hidden="true"><!-- APP_LOGO --></span>
+        <span class="brand-name">余韵</span>
+        <span class="brand-en">ECHOES<br>OF LYRIC</span>
+      </a>
+      <div class="header-right">
+        <span id="save-status" class="save-status" role="status"><i></i><span>本地诗集</span></span>
+        <div class="header-actions" id="header-actions"></div>
+      </div>
+    </header>
+
+    <main class="wrap main">
+      <div class="page-heading">
+        <div><span class="eyebrow">PERSONAL ANTHOLOGY</span><h1>字句之间，自有回响<span class="heading-dot">。</span></h1></div>
+        <button type="button" class="collection-summary" data-action="library" aria-label="我的诗集"><span id="total-count">06</span><span>则摘录</span><span data-icon="book"></span></button>
+      </div>
+
+      <section class="workbench" aria-label="诗词收录工作台">
+        <aside class="categories" aria-label="诗集分类">
+          <div class="section-heading"><span>分类</span><span id="add-category-button"></span></div>
+          <nav id="category-list" aria-label="选择分类"></nav>
+          <div class="category-bottom"><span class="small-caps">COLLECTION</span><span id="category-total"></span></div>
+        </aside>
+
+        <section class="editor" aria-labelledby="editor-heading">
+          <div class="editor-heading"><div class="editor-title"><span class="entry-number" id="entry-number">01</span><h2 id="editor-heading">摘录</h2><span class="category-caption" id="editor-category"></span></div><div id="editor-actions"></div></div>
+          <form id="excerpt-form" autocomplete="off">
+            <label for="text" class="sr-only">诗词节选</label>
+            <div class="writing-area"><span class="opening-quote" aria-hidden="true">“</span><textarea id="text" name="text" maxlength="2000" placeholder="写下让你停留的那一句……" spellcheck="false"></textarea><div class="writing-bottom"><span id="character-count">0 / 2000</span></div></div>
+            <div class="metadata">
+              <div class="metadata-grid"><div class="field field-title"><input aria-label="作品名称" id="title" name="title" placeholder="作品名称" maxlength="200"></div><div class="field"><input aria-label="作者" id="author" name="author" placeholder="作者" maxlength="100"></div><div class="field field-dynasty"><input aria-label="朝代" id="dynasty" name="dynasty" placeholder="朝代" maxlength="30"></div></div>
+              <div class="url-field"><span data-icon="link"></span><label for="url" class="sr-only">来源链接</label><input id="url" name="url" type="text" placeholder="来源链接（可选）" maxlength="2000"></div>
+            </div>
+            <div class="editor-footer"><span id="entry-status" class="entry-status" aria-live="polite">保留每一次心有所动。</span><div class="editor-footer-actions"><button type="submit" class="icon-button primary-button" id="collect-button" aria-label="收入诗集" data-tip="收入诗集" disabled><span data-icon="plus"></span></button></div></div>
+          </form>
+        </section>
+
+        <aside class="sources" aria-labelledby="sources-heading">
+          <div class="section-heading"><h2 id="sources-heading">寻出处</h2><span class="connection-badge" id="connection-badge"><i></i><span>未连接</span></span></div>
+          <div id="search-status" class="search-status" role="status"></div>
+          <div id="candidate-list" class="candidate-list"></div>
+        </aside>
+      </section>
+
+      <section class="showcase" aria-label="已收录诗词展示">
+        <span class="showcase-ribbon" aria-hidden="true"></span>
+        <div class="showcase-copy" id="showcase-copy"><p class="showcase-text" id="showcase-text"></p><p class="showcase-source" id="showcase-source"></p></div>
+        <div class="showcase-actions" id="showcase-actions"></div>
+      </section>
+      <footer class="page-footer"><span>字句归你，诗意长留。</span><span id="footer-stats">本地保存 · 自由携带</span></footer>
+    </main>
+    <dialog id="modal" class="modal"></dialog>
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <div id="more-menu" class="popover" hidden></div>
+    <input type="file" id="file-input" accept=".json,application/json" hidden>
+  </div>
+  <script type="application/json" id="app-snapshot">/* APP_SNAPSHOT */</script>
+  <script id="app-script">/* APP_JS */</script>
+</body>
+</html>

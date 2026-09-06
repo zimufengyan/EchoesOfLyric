@@ -1,0 +1,27 @@
+{
+  "name": "echoes-of-lyric",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.4.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
