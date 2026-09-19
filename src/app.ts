@@ -7,12 +7,15 @@ import { emptyExcerpt, fields, type Candidate, type Collection, type Excerpt, ty
 import { escapeHTML as e, icon, iconButton as ib } from './icons';
 import { bindCategoryDrag } from './category-drag';
 import { playOpening } from './opening';
+import { FileBindingStore, planFileRestore, type FileBinding } from './file-binding';
 import { downloadFile, errorMessage, FileWriter, isCancellation, jsonFileType, readCache, writeCache, type FilePickers, type ManagedFileHandle } from './storage';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const pristine = document.documentElement.cloneNode(true) as HTMLElement;
 const seed = JSON.parse($('app-snapshot').textContent!) as Snapshot;
 const cacheKey = `echoes.collection.v1:${seed.id}:${location.pathname}`;
+const bindingStore = new FileBindingStore(cacheKey);
+const bindingDisabledKey = `${cacheKey}:binding-disabled`;
 interface CachedState { collection: Collection; category: string; draft: Excerpt; dirty: boolean; editing: { category: string; index: number } | null }
 interface Settings { apiKey: string; currentCategoryOnly: boolean; searchKey: 'enter' | 'shift-enter'; autoSearch: boolean; openingAnimation: boolean }
 let settings: Settings = { apiKey: '', currentCategoryOnly: false, searchKey: 'enter', autoSearch: true, openingAnimation: true, ...readCache<Settings>('echoes.search.v2') };
@@ -27,9 +30,16 @@ let dirty = false;
 let revision = 0;
 let generation = 0;
 let cacheOK = true;
-let saveMode: 'seed' | 'dirty' | 'saving' | 'saved' | 'exported' | 'error' = 'seed';
+let saveMode: 'seed' | 'dirty' | 'saving' | 'saved' | 'connected' | 'exported' | 'error' = 'seed';
 let writer: FileWriter | null = null;
 let selectingFile = false;
+let rememberedFile: FileBinding | null = null;
+let bindingState: 'loading' | 'none' | 'ready' | 'permission' | 'conflict' | 'unavailable' = 'loading';
+let restoringFile = false;
+let rememberOK = true;
+let bindingNotice = '';
+let hasCachedCollection = false;
+const rememberWarning = '文件仍可保存，但浏览器未能记住位置；下次打开可能需要重新选择。';
 let candidates: Candidate[] = [];
 let candidatesLocal = false;
 let selectedCandidate = -1;
@@ -53,6 +63,7 @@ const cached = readCache<CachedState>(cacheKey);
 if (cached) {
   try {
     collection = validateCollection(cached.collection);
+    hasCachedCollection = true;
     category = cached.category;
     draft = Object.fromEntries(fields.map(field => [field, typeof cached.draft?.[field] === 'string' ? cached.draft[field] : ''])) as unknown as Excerpt;
     editing = cached.editing && collection[cached.editing.category]?.[cached.editing.index] ? cached.editing : null;
@@ -69,10 +80,25 @@ function persist(): void {
 
 function renderSaveState(): void {
   const node = $('save-status');
-  const labels = { seed: '本地诗集', dirty: cacheOK ? '浏览器暂存 · 待保存' : '待保存', saving: '正在写入…', saved: `已写入 ${writer?.handle.name ?? 'JSON'}`, exported: '已导出副本', error: '写入失败 · 待保存' };
-  node.dataset.state = saveMode === 'error' ? 'error' : dirty ? 'dirty' : 'saved';
-  node.querySelector('span')!.textContent = labels[saveMode];
-  node.title = labels[saveMode];
+  const labels = { seed: '本地诗集', dirty: cacheOK ? '浏览器暂存 · 待保存' : '待保存', saving: '正在写入…', saved: `已写入 ${writer?.handle.name ?? 'JSON'}`, connected: `已连接 ${writer?.handle.name ?? 'JSON'}`, exported: '已导出副本', error: '写入失败 · 待保存' };
+  const bindingLabels = { loading: '正在恢复保存位置…', permission: '等待文件授权', conflict: '文件有变更 · 待核对', unavailable: '保存文件暂不可用' };
+  const label = bindingState in bindingLabels ? bindingLabels[bindingState as keyof typeof bindingLabels] : labels[saveMode];
+  node.dataset.state = bindingState === 'conflict' || bindingState === 'unavailable' || saveMode === 'error' ? 'error' : dirty || bindingState === 'permission' ? 'dirty' : 'saved';
+  node.querySelector('span')!.textContent = label;
+  node.title = bindingNotice || label;
+  const restoreButton = document.querySelector<HTMLButtonElement>('#header-actions [data-action="restore-file"]');
+  if (restoreButton) {
+    restoreButton.hidden = bindingState === 'loading' || (!!writer && bindingState === 'ready') || (!rememberedFile && !dirty);
+    const actionLabel = bindingState === 'conflict' ? '核对文件变更' : rememberedFile ? '恢复文件访问' : '保存诗集';
+    restoreButton.setAttribute('aria-label', actionLabel); restoreButton.dataset.tip = actionLabel;
+    restoreButton.disabled = restoringFile || selectingFile;
+  }
+  if ($('save-file-name')) $('save-file-name').textContent = rememberedFile ? `${rememberedFile.handle.name}${rememberOK ? '' : ' · 仅本次打开有效'}` : '首次收录时选择 JSON 文件';
+  if ($('save-file-detail')) $('save-file-detail').textContent = bindingNotice || (bindingState === 'permission' ? '点击连接图标，允许继续访问。' : bindingState === 'ready' && rememberOK ? '已记住保存文件，下次打开自动尝试连接。' : '');
+  const settingsRestore = document.querySelector<HTMLButtonElement>('#settings-form [data-action="restore-file"]');
+  if (settingsRestore) { settingsRestore.hidden = !rememberedFile || bindingState === 'ready'; settingsRestore.disabled = restoringFile; }
+  const forget = document.querySelector<HTMLButtonElement>('[data-action="forget-file"]');
+  if (forget) forget.hidden = !rememberedFile;
 }
 
 function toast(message: string, error = false, undo?: () => void, actionLabel = '撤销'): void {
@@ -107,17 +133,26 @@ async function writeBoundFile(): Promise<void> {
   const target = writer, version = revision, epoch = generation;
   saveMode = 'saving'; renderSaveState();
   try {
-    await target.write(collection);
+    const content = await target.write(collection);
+    if (writer !== target || generation !== epoch) return;
+    await rememberFile({ handle: target.handle, expectedText: content });
     if (writer !== target || generation !== epoch) return;
     if (version === revision) { dirty = false; saveMode = 'saved'; persist(); }
   } catch (error) {
     if (writer !== target || generation !== epoch) return;
+    if (error instanceof Error && ['NotAllowedError', 'FileChangedError', 'NotFoundError'].includes(error.name)) {
+      writer.detach(); writer = null; generation++;
+      bindingState = error.name === 'NotAllowedError' ? 'permission' : error.name === 'FileChangedError' ? 'conflict' : 'unavailable';
+      bindingNotice = errorMessage(error);
+    }
     dirty = true; saveMode = 'error'; persist(); toast(errorMessage(error), true);
   }
 }
 
 async function saveJSON(forceNew = false): Promise<void> {
+  if (bindingState === 'loading') { toast('正在恢复保存位置，请稍后点击保存。'); return; }
   if (writer && !forceNew) { await writeBoundFile(); return; }
+  if (rememberedFile && !forceNew) { await restoreFile(true); return; }
   if (selectingFile) return;
   const picker = (window as unknown as FilePickers).showSaveFilePicker;
   if (!picker) { exportJSON(); return; }
@@ -125,14 +160,130 @@ async function saveJSON(forceNew = false): Promise<void> {
   try {
     const handle = await picker.call(window, { suggestedName: 'echoes_of_lyric.json', types: jsonFileType });
     const initialText = await (await handle.getFile()).text();
-    writer?.detach(); writer = new FileWriter(handle, initialText); generation++;
+    attachFile(handle, initialText);
     await writeBoundFile();
   } catch (error) {
     if (isCancellation(error)) return;
     toast(errorMessage(error), true);
     openModal('下载保存', `<p>这个浏览器暂时无法直接写入文件。你可以下载 JSON 副本保存当前诗集。</p><div class="modal-actions"><button class="text-button" data-action="close">取消</button><button class="text-button primary" id="fallback-download">${icon('download')}下载 JSON</button></div>`);
     $('fallback-download').onclick = () => { exportJSON(); closeModal(); };
-  } finally { selectingFile = false; }
+  } finally { selectingFile = false; renderSaveState(); }
+}
+
+function rememberFile(record: FileBinding): Promise<void> {
+  rememberedFile = record;
+  const epoch = generation;
+  writeCache(bindingDisabledKey, false);
+  return bindingStore.save(record).then(() => {
+    if (generation === epoch) {
+      rememberOK = true;
+      if (bindingNotice === rememberWarning) bindingNotice = '';
+      renderSaveState();
+    }
+  }).catch(() => {
+    if (generation !== epoch) return;
+    const warn = rememberOK; rememberOK = false;
+    bindingNotice = rememberWarning;
+    renderSaveState(); if (warn) toast(bindingNotice, true);
+  });
+}
+
+function attachFile(handle: ManagedFileHandle, text: string): void {
+  writer?.detach(); generation++;
+  writer = new FileWriter(handle, text);
+  bindingState = 'ready'; bindingNotice = '';
+  void rememberFile({ handle, expectedText: text });
+}
+
+function forgetFile(): void {
+  writer?.detach(); writer = null; rememberedFile = null; generation++;
+  bindingState = 'none'; bindingNotice = '';
+  if (!dirty) saveMode = 'seed';
+  writeCache(bindingDisabledKey, true);
+  void bindingStore.clear().catch(() => {});
+  renderSaveState();
+}
+
+function loadDiskCollection(text: string): void {
+  collection = parseCollection(text);
+  if (!Object.hasOwn(collection, category)) category = Object.keys(collection)[0] ?? '';
+  // Keep the draft, but discard indices belonging to an older collection.
+  editing = null; invalidateSearch(); candidates = []; selectedCandidate = -1; autoMetadata = false;
+  populateForm(); renderCategories(); renderCandidates(); setSearchStatus(''); ensureShowcase();
+  if ($('library-list')) renderLibrary();
+}
+
+async function restoreFile(userGesture: boolean): Promise<void> {
+  if (!rememberedFile || restoringFile || selectingFile) return;
+  const record = rememberedFile, epoch = generation;
+  const stillCurrent = () => generation === epoch && rememberedFile === record;
+  restoringFile = true; renderSaveState();
+  try {
+    // Request directly in the click handler; awaiting IndexedDB first may lose activation.
+    const permission = userGesture && record.handle.requestPermission
+      ? await record.handle.requestPermission({ mode: 'readwrite' })
+      : await record.handle.queryPermission?.({ mode: 'readwrite' }) ?? 'prompt';
+    if (!stillCurrent()) return;
+    if (permission !== 'granted') {
+      bindingState = 'permission'; bindingNotice = '已记住文件；允许访问后即可继续保存，无需重新选择位置。';
+      if (userGesture) toast('未获得文件授权，改动仍保留在浏览器中。', true);
+      return;
+    }
+    const file = await record.handle.getFile();
+    if (file.size > 20 * 1024 * 1024) throw new Error('文件超过 20 MB，请先拆分诗集。');
+    const text = await file.text();
+    if (!stillCurrent()) return;
+    const plan = planFileRestore(record.expectedText, text, collection, hasCachedCollection || revision > 0);
+    if (plan === 'conflict') {
+      bindingState = 'conflict'; bindingNotice = 'JSON 和浏览器暂存均有变化，请核对后继续保存。';
+      if (userGesture) reviewFileChanges(record, text);
+      return;
+    }
+    if (plan === 'load') loadDiskCollection(text);
+    attachFile(record.handle, text);
+    if (plan === 'write') { dirty = true; await writeBoundFile(); }
+    else { dirty = false; saveMode = 'connected'; persist(); }
+  } catch (error) {
+    if (!stillCurrent()) return;
+    bindingState = error instanceof Error && error.name === 'NotAllowedError' ? 'permission' : 'unavailable';
+    bindingNotice = error instanceof Error && error.name === 'NotFoundError' ? '原文件已移动或删除，请在设置中重新选择保存位置。' : errorMessage(error);
+    if (userGesture) toast(bindingNotice, true);
+  } finally { restoringFile = false; renderSaveState(); }
+}
+
+function reviewFileChanges(record: FileBinding, text: string): void {
+  const epoch = generation;
+  const incoming = parseCollection(text);
+  const preview = mergeCollections(collection, incoming);
+  openModal('核对文件变更', `<p>${e(record.handle.name)}</p><div class="form-note">文件与浏览器暂存均有变化，尚未覆盖任何一方。<br>合并后共 ${countEntries(preview.collection)} 则，跳过 ${preview.skipped} 则完全重复的摘录。</div><div class="modal-actions"><button type="button" class="text-button" data-action="close">稍后处理</button><button type="button" class="text-button" id="restore-save-as">当前诗集另存为</button><button type="button" class="text-button" id="restore-load">备份当前并载入文件</button><button type="button" class="text-button primary" id="restore-merge">合并并保存</button></div>`);
+  $('restore-save-as').onclick = () => { closeModal(); void saveJSON(true); };
+  $('restore-load').onclick = () => {
+    if (generation !== epoch) return;
+    exportJSON(`echoes_backup_${Date.now()}.json`, false);
+    loadDiskCollection(text); attachFile(record.handle, text);
+    dirty = false; saveMode = 'connected'; persist(); closeModal();
+  };
+  $('restore-merge').onclick = () => {
+    if (generation !== epoch) return;
+    collection = mergeCollections(collection, incoming).collection;
+    editing = null; attachFile(record.handle, text); populateForm();
+    closeModal(); changeCollection();
+  };
+}
+
+async function restoreRememberedFile(): Promise<void> {
+  const epoch = generation;
+  try {
+    const record = readCache<boolean>(bindingDisabledKey) ? null : await bindingStore.read();
+    if (generation !== epoch) return;
+    rememberedFile = record;
+    if (record) await restoreFile(false);
+    else bindingState = 'none';
+  } catch {
+    if (generation !== epoch) return;
+    bindingState = 'none'; rememberOK = false;
+    bindingNotice = '浏览器暂时无法恢复保存位置，本次可重新选择文件。';
+  } finally { renderSaveState(); }
 }
 
 function exportJSON(filename = 'echoes_of_lyric.json', markSaved = true): void {
@@ -359,7 +510,7 @@ function finishDeleteCategory(name: string, destination?: string): void {
 }
 
 function openSettings(): void {
-  openModal('设置', `<form id="settings-form"><label class="field"><span class="settings-label">Tavily API Key <a class="settings-link" href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">获取 Key ↗</a></span><input id="search-api-key" type="password" value="${e(settings.apiKey)}" placeholder="tvly-…" autocomplete="off" spellcheck="false"></label><div class="usage-row"><span id="usage-label">本月额度</span><span id="usage-value" role="status">— / —</span>${ib('refresh', '刷新 API 额度', 'refresh-usage')}<small id="usage-detail"></small></div><div class="settings-save-row"><div><span>自动保存</span><small id="save-file-name">${e(writer?.handle.name ?? '首次收录时选择 JSON 文件')}</small></div>${ib('folder', '选择 JSON 保存位置', 'choose-save-file')}</div><label class="field"><span>搜索快捷键</span><select id="search-key"><option value="enter" ${settings.searchKey === 'enter' ? 'selected' : ''}>Enter 搜索 · Shift + Enter 换行</option><option value="shift-enter" ${settings.searchKey === 'shift-enter' ? 'selected' : ''}>Shift + Enter 搜索 · Enter 换行</option></select></label><label class="checkbox-row"><input type="checkbox" id="auto-search" ${settings.autoSearch ? 'checked' : ''}>输入停顿后自动查找</label><label class="checkbox-row"><input type="checkbox" id="show-current-only" ${settings.currentCategoryOnly ? 'checked' : ''}>展示当前分类</label><label class="checkbox-row"><input type="checkbox" id="opening-animation" ${settings.openingAnimation ? 'checked' : ''}>播放开屏动画</label><div class="modal-actions"><button class="text-button" type="button" data-action="close">取消</button><button type="submit" class="text-button primary">${icon('check')}保存设置</button></div></form>`);
+  openModal('设置', `<form id="settings-form"><label class="field"><span class="settings-label">Tavily API Key <a class="settings-link" href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">获取 Key ↗</a></span><input id="search-api-key" type="password" value="${e(settings.apiKey)}" placeholder="tvly-…" autocomplete="off" spellcheck="false"></label><div class="usage-row"><span id="usage-label">本月额度</span><span id="usage-value" role="status">— / —</span>${ib('refresh', '刷新 API 额度', 'refresh-usage')}<small id="usage-detail"></small></div><div class="settings-save-row"><div><span>自动保存</span><small id="save-file-name"></small><small id="save-file-detail"></small></div><div class="settings-file-actions">${ib('link', '恢复文件访问', 'restore-file')}${ib('folder', '选择 JSON 保存位置', 'choose-save-file')}${ib('close', '取消记住保存文件', 'forget-file')}</div></div><label class="field"><span>搜索快捷键</span><select id="search-key"><option value="enter" ${settings.searchKey === 'enter' ? 'selected' : ''}>Enter 搜索 · Shift + Enter 换行</option><option value="shift-enter" ${settings.searchKey === 'shift-enter' ? 'selected' : ''}>Shift + Enter 搜索 · Enter 换行</option></select></label><label class="checkbox-row"><input type="checkbox" id="auto-search" ${settings.autoSearch ? 'checked' : ''}>输入停顿后自动查找</label><label class="checkbox-row"><input type="checkbox" id="show-current-only" ${settings.currentCategoryOnly ? 'checked' : ''}>展示当前分类</label><label class="checkbox-row"><input type="checkbox" id="opening-animation" ${settings.openingAnimation ? 'checked' : ''}>播放开屏动画</label><div class="modal-actions"><button class="text-button" type="button" data-action="close">取消</button><button type="submit" class="text-button primary">${icon('check')}保存设置</button></div></form>`);
   let usageAbort: AbortController | undefined;
   let usageTimer: ReturnType<typeof setTimeout> | undefined;
   const refresh = async () => {
@@ -388,7 +539,8 @@ function openSettings(): void {
   };
   modalCleanup = () => { usageAbort?.abort(); usageAbort = undefined; clearTimeout(usageTimer); };
   document.querySelector<HTMLButtonElement>('[data-action="refresh-usage"]')!.onclick = () => void refresh();
-  document.querySelector<HTMLButtonElement>('[data-action="choose-save-file"]')!.onclick = async () => { await saveJSON(true); if ($('save-file-name')) $('save-file-name').textContent = writer?.handle.name ?? '首次收录时选择 JSON 文件'; };
+  renderSaveState();
+  document.querySelector<HTMLButtonElement>('[data-action="choose-save-file"]')!.onclick = () => { void saveJSON(true); };
   $('search-api-key').oninput = () => {
     usageAbort?.abort(); usageAbort = undefined; clearTimeout(usageTimer);
     $('usage-value').textContent = '— / —'; $('usage-detail').textContent = '点击刷新查看额度';
@@ -539,12 +691,16 @@ function previewImport(text: string, filename: string, handle?: ManagedFileHandl
   $('import-confirm').onclick = async () => {
     const replace = (document.querySelector('[name="import-mode"]:checked') as HTMLInputElement).value === 'replace';
     if (replace && $<HTMLInputElement>('backup-current').checked && countEntries(collection)) exportJSON(`echoes_backup_${new Date().toISOString().replace(/[:.]/g, '-')}.json`, false);
-    let bind = !!handle && $<HTMLInputElement>('bind-import').checked;
+    const wantsBinding = !!handle && $<HTMLInputElement>('bind-import').checked;
+    let bind = wantsBinding;
     if (bind && handle?.requestPermission) {
-      try { if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') { bind = false; toast('未获得写入权限；诗集可以导入，收录时再选择保存位置。', true); } }
-      catch { bind = false; toast('未获得写入权限；收录时再选择保存位置。', true); }
+      try { if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') { bind = false; toast('诗集已导入；允许文件访问后可继续保存。', true); } }
+      catch { bind = false; toast('未获得写入权限；点击连接图标可重试。', true); }
     }
-    writer?.detach(); writer = bind ? new FileWriter(handle!, text) : null; generation++;
+    if (bind) attachFile(handle!, text); else forgetFile();
+    if (wantsBinding && !bind) {
+      void rememberFile({ handle: handle!, expectedText: text }); bindingState = 'permission';
+    }
     collection = replace ? incoming : preview.collection;
     if (!Object.hasOwn(collection, category)) category = Object.keys(collection)[0] ?? '';
     invalidateSearch(); editing = null; candidates = []; selectedCandidate = -1; autoMetadata = false;
@@ -611,6 +767,8 @@ function bindActions(): void {
       case 'settings': openSettings(); break;
       case 'open': void openJSON(); break;
       case 'save': void saveJSON(); break;
+      case 'restore-file': void saveJSON(); break;
+      case 'forget-file': forgetFile(); toast('已取消自动连接，JSON 文件仍保留。'); break;
       case 'new-category': openCategoryEditor(); break;
       case 'search': void searchSources(); break;
       case 'refresh': showNext(); startCycle(); break;
@@ -689,7 +847,7 @@ function bindSearchKeyboard(): void {
 
 function boot(): void {
   document.querySelectorAll<HTMLElement>('[data-icon]').forEach(node => { node.innerHTML = icon(node.dataset.icon!); });
-  $('header-actions').innerHTML = ib('settings', '设置', 'settings') + ib('more', '更多操作', 'more');
+  $('header-actions').innerHTML = ib('link', '恢复文件访问', 'restore-file', 'hidden') + ib('settings', '设置', 'settings') + ib('more', '更多操作', 'more');
   $('add-category-button').innerHTML = ib('plus', '新建分类', 'new-category');
   $('editor-actions').innerHTML = ib('undo', '清空当前草稿', 'clear') + ib('search', '查找出处', 'search');
   $('showcase-actions').innerHTML = ib('refresh', '换一句', 'refresh') + ib('pause', '暂停自动轮换', 'pause', 'aria-pressed="false"');
@@ -699,6 +857,7 @@ function boot(): void {
     collection = Object.fromEntries(names.map(name => [name, collection[name]]));
     changeCollection();
   });
+  void restoreRememberedFile();
   playOpening({ enabled: settings.openingAnimation, collection, app: $('app'), landing: $('showcase-copy') });
 }
 

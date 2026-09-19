@@ -1,12 +1,18 @@
 import { test, expect, type Page } from '@playwright/test';
-import { readFile, mkdir, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const htmlPath = resolve('dist/echoes_of_lyric.html');
+const htmlPath = resolve('test-results/browser-fixtures/余韵.html');
 const fileURL = pathToFileURL(htmlPath).href;
-const initialHTML = await readFile(htmlPath, 'utf8');
-const initialCollection = JSON.parse(initialHTML.match(/<script type="application\/json" id="app-snapshot">(.*?)<\/script>/s)![1]).collection;
+const initialCollection = JSON.parse(await readFile('tests/fixtures/anthology.json', 'utf8'));
+const builtHTML = await readFile('dist/echoes_of_lyric.html', 'utf8');
+const initialHTML = builtHTML.replace(/(<script type="application\/json" id="app-snapshot">).*?(<\/script>)/s,
+  (_match, start, end) => start + JSON.stringify({ version: 1, id: 'echoes-browser-test-v1', collection: initialCollection, category: '帅' }) + end);
+test.beforeAll(async () => {
+  await mkdir('test-results/browser-fixtures', { recursive: true });
+  await writeFile(htmlPath, initialHTML);
+});
 const initialCount = Object.values(initialCollection).flat().length;
 const total = (extra = 0) => String(initialCount + extra).padStart(2, '0');
 async function enterWorkspace(page: Page) {
@@ -101,7 +107,7 @@ test('file writes report permission failure honestly and retain edits', async ({
     (window as any).showSaveFilePicker = async () => ({ name: 'denied.json', getFile: async () => new File([''], 'denied.json'), createWritable: async () => { throw new DOMException('Denied', 'NotAllowedError'); } });
   });
   await openFresh(page); await addManual(page);
-  await expect(page.locator('#save-status')).toContainText('写入失败'); await expect(page.locator('#total-count')).toHaveText(total(1));
+  await expect(page.locator('#save-status')).toContainText('等待文件授权'); await expect(page.locator('#save-status')).toHaveAttribute('data-state', 'error'); await expect(page.locator('#total-count')).toHaveText(total(1));
 });
 
 test('portable HTML retains latest data at a new Unicode path and excludes secrets', async ({ page, browser }) => {

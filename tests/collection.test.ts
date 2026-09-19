@@ -5,13 +5,11 @@ import { countEntries, duplicateIndex, escapeEmbeddedJSON, mergeCollections, mov
 import { diffCharacters, normalizeDynasty, rankCandidates, similarity, supplementalQueries } from '../shared/matching';
 
 const seedText = await readFile('echoes_of_lyric.json', 'utf8');
-const collection = parseCollection(seedText);
-const seedCount = Object.values(JSON.parse(seedText)).flat().length;
+const collection = parseCollection(await readFile('tests/fixtures/anthology.json', 'utf8'));
 test('seed is strict JSON and preserves the current anthology', () => {
-  assert.equal(countEntries(collection), seedCount);
-  assert.deepEqual(Object.keys(collection), ['帅', '痛', '怒']);
-  assert.equal(collection['怒'][0].text, '十四万人弃卸甲，更无一个是男儿');
-  assert.equal(countEntries(parseCollection(serializeCollection(collection))), seedCount);
+  const seed = parseCollection(seedText);
+  assert.deepEqual({ ...seed }, JSON.parse(seedText));
+  assert.deepEqual(parseCollection(serializeCollection(seed)), seed);
 });
 test('trailing commas are accepted without touching commas inside strings', () => {
   const parsed = parseCollection('{"念":[{"text":"逗号 ,} 也不是语法",},],}');
@@ -33,7 +31,7 @@ test('rename, reorder, merge and duplicates preserve all five fields', () => {
   assert.throws(() => renameCategory(renamed, '风骨', '痛'), /同名/);
   assert.deepEqual(Object.keys(moveCategory(renamed, '怒', -1)), ['风骨', '怒', '痛']);
   const merged = mergeCollections(collection, collection);
-  assert.equal(merged.added, 0); assert.equal(merged.skipped, seedCount);
+  assert.equal(merged.added, 0); assert.equal(merged.skipped, countEntries(collection));
   assert.equal(duplicateIndex(collection['帅'], ' 他年我若为青帝，报与桃花一处开。'), 0);
 });
 test('HTML snapshot JSON cannot terminate a script element', () => {

@@ -65,7 +65,7 @@ export class FileWriter {
     void this.tail.finally(() => { this.worker?.terminate(); this.worker = null; });
   }
 
-  write(data: string | Collection): Promise<void> {
+  write(data: string | Collection): Promise<string> {
     const snapshot = typeof data === 'string' ? data : structuredClone(data);
     const operation = this.tail.then(async () => {
       if (!this.active) throw new Error('保存位置已经更换，请在当前诗集重新保存。');
@@ -91,8 +91,9 @@ export class FileWriter {
         await writeCheckedFile(this.handle, this.expectedText, content);
       }
       this.expectedText = content;
+      return content;
     });
-    this.tail = operation.catch(() => {});
+    this.tail = operation.then(() => {}, () => {});
     return operation;
   }
 }
